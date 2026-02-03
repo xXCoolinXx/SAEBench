@@ -7,16 +7,12 @@ import time
 from dataclasses import asdict
 from datetime import datetime
 
-import torch
-from sae_lens import SAE
-from tqdm import tqdm
-from transformer_lens import HookedTransformer
-
 import sae_bench.evals.sparse_probing.probe_training as probe_training
 import sae_bench.sae_bench_utils.activation_collection as activation_collection
 import sae_bench.sae_bench_utils.dataset_info as dataset_info
 import sae_bench.sae_bench_utils.dataset_utils as dataset_utils
 import sae_bench.sae_bench_utils.general_utils as general_utils
+import torch
 from sae_bench.evals.sparse_probing.eval_config import SparseProbingEvalConfig
 from sae_bench.evals.sparse_probing.eval_output import (
     EVAL_TYPE_ID_SPARSE_PROBING,
@@ -34,6 +30,9 @@ from sae_bench.sae_bench_utils import (
 from sae_bench.sae_bench_utils.sae_selection_utils import (
     get_saes_from_regex,
 )
+from sae_lens import SAE
+from tqdm import tqdm
+from transformer_lens import HookedTransformer
 
 
 def get_dataset_activations(
@@ -176,9 +175,21 @@ def run_eval_single_dataset(
     all_sae_train_acts_BF = activation_collection.get_sae_meaned_activations(
         all_train_acts_BLD, sae, config.sae_batch_size
     )
+
     all_sae_test_acts_BF = activation_collection.get_sae_meaned_activations(
         all_test_acts_BLD, sae, config.sae_batch_size
     )
+
+    # Slice to only include the chosen indices of features
+    for k in all_sae_train_acts_BF.keys():
+        all_sae_train_acts_BF[k] = all_sae_train_acts_BF[k][
+            ..., config.sae_feature_indices
+        ]
+
+    for k in all_sae_test_acts_BF.keys():
+        all_sae_test_acts_BF[k] = all_sae_test_acts_BF[k][
+            ..., config.sae_feature_indices
+        ]
 
     for key in list(all_train_acts_BLD.keys()):
         del all_train_acts_BLD[key]
@@ -285,7 +296,7 @@ def run_eval(
     selected_saes: list[tuple[str, SAE]] | list[tuple[str, str]],
     device: str,
     output_path: str,
-    force_rerun: bool = False,
+    force_rerun: bool = True,
     clean_up_activations: bool = False,
     save_activations: bool = True,
     artifacts_path: str = "artifacts",
@@ -296,6 +307,12 @@ def run_eval(
     If clean_up_activations is True, which means that the activations are deleted after the evaluation is done.
     You may want to use this because activations for all datasets can easily be 10s of GBs.
     Return dict is a dict of SAE name: evaluation results for that SAE."""
+
+    if len(selected_saes) > 1 and config.sae_feature_indices is not None:
+        raise NotImplementedError(
+            "Passing in a set of feature indices for multiple SAEs is not currently supported :("
+        )
+
     eval_instance_id = get_eval_uuid()
     sae_lens_version = get_sae_lens_version()
     sae_bench_commit_hash = get_sae_bench_version()
@@ -319,8 +336,21 @@ def run_eval(
         )  # type: ignore
         sae = sae.to(device=device, dtype=llm_dtype)
 
+        if config.sae_feature_indices is None:
+            d_sae = sae.W_dec.shape[0]
+            config.sae_feature_indices = torch.arange(0, d_sae, device=device)
+
+        r_min = config.sae_feature_indices.min().item()
+        r_max = config.sae_feature_indices.max().item()
         sae_result_path = general_utils.get_results_filepath(
-            output_path, sae_release, sae_id
+            output_path,
+            sae_release,
+            sae_id,
+            extra_str=f"{r_min}_{r_max}",
+        )
+
+        print(
+            f"Running {sae_id}, {sae} using latents {r_min} through {r_max} (possibly not contiguously!)"
         )
 
         if os.path.exists(sae_result_path) and not force_rerun:
@@ -384,6 +414,9 @@ def run_eval(
 
         gc.collect()
         torch.cuda.empty_cache()
+
+        # Reset back to none to maintain functionality when feature_indices is not present
+        config.sae_feature_indices = None
 
     if clean_up_activations:
         if artifacts_folder is not None and os.path.exists(artifacts_folder):

@@ -1,11 +1,13 @@
-from pydantic import Field
+from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
-
 from sae_bench.evals.base_eval_output import BaseEvalConfig
+from torch import Tensor
 
 
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class SparseProbingEvalConfig(BaseEvalConfig):
+    # model_config = ConfigDict(arbitrary_types_allowed=True)
+
     random_seed: int = Field(
         default=42,
         title="Random Seed",
@@ -75,4 +77,10 @@ class SparseProbingEvalConfig(BaseEvalConfig):
         default=False,
         title="Lower Memory Usage",
         description="Lower GPU memory usage by doing more computation on the CPU. Useful on 1M width SAEs. Will be slower and require more system memory.",
+    )
+
+    sae_feature_indices: Tensor | None = Field(
+        default=None,
+        title="Feature Indices",
+        description="The indices upon which we will train the SAE probes. Useful for analyzing partitioned architectures, such as Matryoshka and T-SAE.",
     )

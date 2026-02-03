@@ -159,8 +159,13 @@ def load_and_format_sae(
     return sae_id, sae, sparsity
 
 
-def get_results_filepath(output_path: str, sae_release: str, sae_id: str) -> str:
-    sae_result_file = f"{sae_release}_{sae_id}_eval_results.json"
+def get_results_filepath(
+    output_path: str, sae_release: str, sae_id: str, extra_str: str | None = None
+) -> str:
+    if extra_str is None:
+        sae_result_file = f"{sae_release}_{sae_id}_eval_results.json"
+    else:
+        sae_result_file = f"{sae_release}_{sae_id}_{extra_str}_eval_results.json"
     sae_result_file = sae_result_file.replace("/", "_")
     sae_result_path = os.path.join(output_path, sae_result_file)
 

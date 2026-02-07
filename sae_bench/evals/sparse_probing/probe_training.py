@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from beartype import beartype
 from jaxtyping import Bool, Float, Int, jaxtyped
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, OrthogonalMatchingPursuit
 from sklearn.metrics import accuracy_score
 
 import sae_bench.sae_bench_utils.dataset_info as dataset_info
@@ -94,16 +94,40 @@ def get_top_k_mean_diff_mask(
     labels_B: Int[torch.Tensor, "batch_size"],
     k: int,
 ) -> Bool[torch.Tensor, "k"]:
-    positive_mask_B = labels_B == dataset_info.POSITIVE_CLASS_LABEL
-    negative_mask_B = labels_B == dataset_info.NEGATIVE_CLASS_LABEL
+    return get_omp_mask(acts_BD, labels_B, k)
+    # positive_mask_B = labels_B == dataset_info.POSITIVE_CLASS_LABEL
+    # negative_mask_B = labels_B == dataset_info.NEGATIVE_CLASS_LABEL
 
-    positive_distribution_D = acts_BD[positive_mask_B].mean(dim=0)
-    negative_distribution_D = acts_BD[negative_mask_B].mean(dim=0)
-    distribution_diff_D = (positive_distribution_D - negative_distribution_D).abs()
-    top_k_indices_D = torch.argsort(distribution_diff_D, descending=True)[:k]
+    # positive_distribution_D = acts_BD[positive_mask_B].mean(dim=0)
+    # negative_distribution_D = acts_BD[negative_mask_B].mean(dim=0)
+    # distribution_diff_D = (positive_distribution_D - negative_distribution_D).abs()
+    # top_k_indices_D = torch.argsort(distribution_diff_D, descending=True)[:k]
 
+    # mask_D = torch.ones(acts_BD.shape[1], dtype=torch.bool, device=acts_BD.device)
+    # mask_D[top_k_indices_D] = False
+
+    # return mask_D
+
+# Test with orthogonal matching pursuit feature selection - maybe this helps!
+@jaxtyped(typechecker=beartype)
+def get_omp_mask(
+    acts_BD: Float[torch.Tensor, "batch_size d_model"],
+    labels_B: Int[torch.Tensor, "batch_size"],
+    k: int,
+) -> Bool[torch.Tensor, "d_model"]:
+    """Use Orthogonal Matching Pursuit to greedily select k features
+    that best predict the binary label (treated as a regression target)."""
+    acts_np = acts_BD.cpu().float().numpy()
+    labels_np = labels_B.cpu().float().numpy()
+
+    omp = OrthogonalMatchingPursuit(n_nonzero_coefs=k)
+    omp.fit(acts_np, labels_np)
+
+    selected = omp.coef_ != 0  # boolean numpy array of shape (d_model,)
+
+    # Existing convention: True = EXCLUDE, False = KEEP
     mask_D = torch.ones(acts_BD.shape[1], dtype=torch.bool, device=acts_BD.device)
-    mask_D[top_k_indices_D] = False
+    mask_D[torch.from_numpy(selected).to(acts_BD.device)] = False
 
     return mask_D
 

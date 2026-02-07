@@ -7,11 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from sae_lens import SAE
-from sae_probes import run_baseline_evals, run_sae_evals
-from tqdm import tqdm
-
 import sae_bench.sae_bench_utils.general_utils as general_utils
+import torch
 from sae_bench.evals.sparse_probing_sae_probes.eval_config import (
     SparseProbingSaeProbesEvalConfig,
 )
@@ -28,6 +25,9 @@ from sae_bench.sae_bench_utils import (
     get_sae_lens_version,
 )
 from sae_bench.sae_bench_utils.sae_selection_utils import get_saes_from_regex
+from sae_lens import SAE
+from sae_probes import run_baseline_evals
+from tqdm import tqdm
 
 
 def _sae_probes_results_glob(
@@ -82,6 +82,171 @@ def _mean_of_keys(dicts: list[dict[str, float]], key: str) -> float | None:
     return float(sum(vals) / len(vals))
 
 
+# Unholy monkey patch
+# --- 1. Imports from your library structure ---
+# Import the specific module we are patching to access its local functions
+import importlib
+from unittest.mock import patch
+
+from sae_probes.constants import DEFAULT_RESULTS_PATH  # noqa: E402
+from sae_probes.generate_sae_activations import generate_sae_activations  # noqa: E402
+from sae_probes.utils_training import find_best_reg  # noqa: E402
+
+
+def create_latent_subset_patch(sae_feature_indices: torch.Tensor, sae_evals_mod):  # type: ignore
+    """
+    Returns a patched version of run_sae_eval that restricts analysis to
+    specific SAE latent indices provided in the tensor.
+    """
+
+    def patched_run_sae_eval(
+        sae,
+        dataset,
+        hook_name,
+        reg_type,
+        setting,
+        model_name,
+        model_cache_path,
+        binarize=False,
+        num_train=None,
+        corrupt_frac=None,
+        frac=None,
+        device="cuda",
+        batch_size=128,
+        ks=None,
+        results_path=DEFAULT_RESULTS_PATH,
+        mean_diff_normalization="mean",
+    ):
+        print("PATCHED run_sae_eval", dataset, "subset_size", len(sae_feature_indices))
+        # 1. Generate full activations
+        activations = generate_sae_activations(
+            sae=sae,
+            setting=setting,
+            dataset=dataset,
+            hook_name=hook_name,
+            model_name=model_name,
+            device=device,
+            num_train=num_train,
+            frac=frac,
+            batch_size=batch_size,
+            model_cache_path=model_cache_path,
+        )
+
+        X_train_sae = activations.X_train
+        X_test_sae = activations.X_test
+        y_train = activations.y_train
+        y_test = activations.y_test
+
+        idxs = sae_feature_indices.to(X_train_sae.device)
+
+        # --- PATCH START: Subset Features ---
+        # Slice the columns using the provided tensor
+        X_train_sae = X_train_sae[:, idxs]
+        X_test_sae = X_test_sae[:, idxs]
+
+        subset_size = X_train_sae.shape[1]
+
+        # Filter 'k' values that are larger than our new subset
+        if ks is None:
+            if setting == "normal":
+                ks = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+            else:
+                ks = [16, 128]
+
+        ks = [k for k in ks if k <= subset_size]
+        if not ks:
+            ks = [subset_size]
+        # --- PATCH END ---
+
+        all_metrics = []
+
+        # 2. Retrieve local helpers dynamically from the module
+        mean_act_normalization = getattr(sae_evals_mod, "mean_act_normalization")
+        get_sorted_indices = getattr(sae_evals_mod, "get_sorted_indices")
+        get_save_metrics_path = getattr(sae_evals_mod, "get_save_metrics_path")
+
+        normalization = None
+        if mean_diff_normalization == "mean":
+            normalization = mean_act_normalization
+        elif mean_diff_normalization == "none":
+            normalization = None
+        elif callable(mean_diff_normalization):
+            normalization = mean_diff_normalization
+        else:
+            raise ValueError(
+                f"Invalid mean_diff_normalization: {mean_diff_normalization}"
+            )
+
+        # 3. Calculate indices on the SUBSET
+        sorted_subset_indices = get_sorted_indices(X_train_sae, y_train, normalization)
+
+        for k in tqdm(ks, desc="Evaluating k values"):
+            top_subset_indices = sorted_subset_indices[:k]
+
+            X_train_filtered = X_train_sae[:, top_subset_indices]
+            X_test_filtered = X_test_sae[:, top_subset_indices]
+
+            if binarize and setting == "normal":
+                X_train_filtered = X_train_filtered > 1
+                X_test_filtered = X_test_filtered > 1
+
+            results = find_best_reg(
+                X_train=X_train_filtered,
+                y_train=y_train,
+                X_test=X_test_filtered,
+                y_test=y_test,
+                n_jobs=-1,
+                parallel=False,
+                penalty=reg_type,
+            )
+            metrics = asdict(results.metrics)
+
+            # --- PATCH: Map indices back to global IDs ---
+            # 'top_subset_indices' are indices 0..N of the subset.
+            # We map them back to the original SAE indices for the JSON log.
+            global_indices = idxs[top_subset_indices].tolist()
+
+            metrics.update(
+                {
+                    "k": k,
+                    "dataset": dataset,
+                    "hook_name": hook_name,
+                    "reg_type": reg_type,
+                    "binarize": binarize,
+                    "indices": global_indices,
+                }
+            )
+
+            if setting == "scarcity":
+                metrics["num_train"] = num_train
+            elif setting == "imbalance":
+                metrics["frac"] = frac
+
+            all_metrics.append(metrics)
+
+        save_path = get_save_metrics_path(
+            dataset=dataset,
+            hook_name=hook_name,
+            reg_type=reg_type,
+            binarize=binarize,
+            model_name=model_name,
+            setting=setting,
+            num_train=num_train,
+            corrupt_frac=corrupt_frac,
+            frac=frac,
+            sae_results_path=results_path,
+        )
+
+        print(f"Saving results to {save_path}")
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(save_path, "w") as f:
+            json.dump(all_metrics, f, indent=4, ensure_ascii=False)
+
+        return True
+
+    return patched_run_sae_eval
+
+
 def run_eval(
     config: SparseProbingSaeProbesEvalConfig,
     selected_saes: list[tuple[str, SAE]] | list[tuple[str, str]],
@@ -93,6 +258,10 @@ def run_eval(
         raise NotImplementedError(
             "Only 'normal' setting is supported for sparse_probing_sae_probes aggregation currently."
         )
+
+    if len(selected_saes) > 1 and config.sae_feature_indices is not None:
+        raise NotImplementedError("Bruh!")
+
     eval_instance_id = get_eval_uuid()
     sae_lens_version = get_sae_lens_version()
     sae_bench_commit_hash = get_sae_bench_version()
@@ -109,31 +278,47 @@ def run_eval(
             sae_release, sae_object_or_id, device
         )
 
+        if config.sae_feature_indices is None:
+            d_sae = sae.W_dec.shape[0]
+            config.sae_feature_indices = torch.arange(0, d_sae, device=device)
+
+        r_min = config.sae_feature_indices.min().item()
+        r_max = config.sae_feature_indices.max().item()
         sae_result_path = general_utils.get_results_filepath(
-            output_path, sae_release, sae_id
+            output_path,
+            sae_release,
+            sae_id,
+            extra_str=f"{r_min}_{r_max}",
         )
 
         if os.path.exists(sae_result_path) and not force_rerun:
             print(f"Skipping {sae_release}_{sae_id} as results already exist")
             continue
 
-        sae_results_path = os.path.join(config.results_path, f"{sae_release}_{sae_id}")
+        sae_results_path = os.path.join(
+            config.results_path, f"{sae_release}_{sae_id}_{r_min}_{r_max}"
+        )
+
         os.makedirs(sae_results_path, exist_ok=True)
 
-        # Run sae-probes (idempotent; will skip if JSONs exist)
-        run_sae_evals(
-            sae=sae,
-            model_name=config.model_name,
-            hook_name=sae.cfg.hook_name,
-            reg_type=config.reg_type,  # type: ignore[arg-type]
-            setting=config.setting,  # type: ignore[arg-type]
-            ks=config.ks,
-            binarize=config.binarize,
-            results_path=sae_results_path,
-            model_cache_path=config.model_cache_path,
-            datasets=config.dataset_names,
-            device=device,
-        )
+        # Perform the unholy monkey patch
+        sae_evals_mod = importlib.import_module("sae_probes.run_sae_evals")
+        patched = create_latent_subset_patch(config.sae_feature_indices, sae_evals_mod)
+
+        with patch.object(sae_evals_mod, "run_sae_eval", new=patched):
+            sae_evals_mod.run_sae_evals(
+                sae=sae,
+                model_name=config.model_name,
+                hook_name=sae.cfg.hook_name,
+                reg_type=config.reg_type,
+                setting=config.setting,
+                ks=config.ks,
+                binarize=config.binarize,
+                results_path=sae_results_path,
+                model_cache_path=config.model_cache_path,
+                datasets=config.dataset_names,
+                device=device,
+            )
 
         # Collect per-dataset JSONs and collate (filter by hook/reg to avoid stale files)
         expected_suffix = f"_{sae.cfg.hook_name}_{config.reg_type}.json"
@@ -273,6 +458,9 @@ def run_eval(
 
         results_dict[f"{sae_release}_{sae_id}"] = asdict(eval_output)
         eval_output.to_json_file(sae_result_path, indent=2)
+
+        # Reset
+        config.sae_feature_indices = None
 
     return results_dict
 

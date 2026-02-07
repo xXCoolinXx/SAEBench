@@ -1,11 +1,11 @@
-from pydantic import Field
+from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
-from sae_probes import DATASETS
-
 from sae_bench.evals.base_eval_output import BaseEvalConfig
+from sae_probes import DATASETS
+from torch import Tensor
 
 
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class SparseProbingSaeProbesEvalConfig(BaseEvalConfig):
     model_name: str = Field(
         default="",
@@ -65,4 +65,10 @@ class SparseProbingSaeProbesEvalConfig(BaseEvalConfig):
         default="logreg",
         title="Baseline Method",
         description="sae-probes baseline method (e.g., 'logreg').",
+    )
+
+    sae_feature_indices: Tensor | None = Field(
+        default=None,
+        title="Feature Indices",
+        description="The indices upon which we will train the SAE probes. Useful for analyzing partitioned architectures, such as Matryoshka and T-SAE.",
     )

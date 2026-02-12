@@ -47,3 +47,6 @@ openai_api_key.txt
 dist/
 
 *.png
+
+logs
+logs/

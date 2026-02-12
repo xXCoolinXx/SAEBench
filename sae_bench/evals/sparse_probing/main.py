@@ -7,6 +7,9 @@ import time
 from dataclasses import asdict
 from datetime import datetime
 
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+
 import sae_bench.evals.sparse_probing.probe_training as probe_training
 import sae_bench.sae_bench_utils.activation_collection as activation_collection
 import sae_bench.sae_bench_utils.dataset_info as dataset_info
@@ -141,19 +144,21 @@ def run_eval_single_dataset(
             batch_size=250,
             epochs=100,
             lr=1e-2,
+            dataset_name=dataset_name,
         )
 
         llm_results = {"llm_test_accuracy": llm_test_accuracies}
 
-        for k in config.k_values:
-            llm_top_k_probes, llm_top_k_test_accuracies = (
-                probe_training.train_probe_on_activations(
-                    all_train_acts_BD,
-                    all_test_acts_BD,
-                    select_top_k=k,
-                )
-            )
-            llm_results[f"llm_top_{k}_test_accuracy"] = llm_top_k_test_accuracies
+        # for k in config.k_values:
+        #     llm_top_k_probes, llm_top_k_test_accuracies = (
+        #         probe_training.train_probe_on_activations(
+        #             all_train_acts_BD,
+        #             all_test_acts_BD,
+        #             select_top_k=k,
+        #             dataset_name=dataset_name,
+        #         )
+        #     )
+        #     llm_results[f"llm_top_{k}_test_accuracy"] = llm_top_k_test_accuracies
 
         acts = {
             "train": all_train_acts_BLD,
@@ -206,6 +211,7 @@ def run_eval_single_dataset(
             batch_size=250,
             epochs=100,
             lr=1e-2,
+            dataset_name=dataset_name,
         )
         per_class_results_dict["sae_test_accuracy"] = sae_test_accuracies
     else:
@@ -229,7 +235,35 @@ def run_eval_single_dataset(
                 select_top_k=k,
             )
         )
+
         per_class_results_dict[f"sae_top_{k}_test_accuracy"] = sae_top_k_test_accuracies
+
+    # search_space = [1e-30, 1e-25, 1e-20, 1e-17, 1e-15]
+
+    # for x in np.logspace(-10, -1, 5):
+    #     sae_l1_probes, sae_l1_test_accuracies = (
+    #         probe_training.train_probe_on_activations(
+    #             all_sae_train_acts_BF,
+    #             all_sae_test_acts_BF,
+    #             select_top_k=None,
+    #             l1_penalty=x,
+    #             use_sklearn=False, # I ain't waiting for all that
+    #         )
+    #     )
+    #     # Report min max avg l0 for the probes
+    #     l0 = []
+
+    #     for probe in sae_l1_probes.values():
+    #         if isinstance(probe, LogisticRegression):
+    #             k_active = np.sum(probe.coef_[0] != 0)
+    #         elif isinstance(probe, probe_training.Probe):
+    #             k_active = torch.count_nonzero(probe.net.weight).item()
+
+    #         l0.append(k_active) # type: ignore
+        
+    #     l0 = np.array(l0)
+            
+    #     per_class_results_dict[f"sae_l1_{l0.min()}_{l0.max()}_{l0.mean()}_test_accuracy"] = sae_l1_test_accuracies
 
     results_dict = {}
     for key, test_accuracies_dict in per_class_results_dict.items():

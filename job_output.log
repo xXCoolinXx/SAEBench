@@ -1,0 +1,62 @@
+Job started on asaxg007 at Thu Feb 12 12:49:50 CST 2026
+GPU allocated:
+Thu Feb 12 12:50:02 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 560.28.03              Driver Version: 560.28.03      CUDA Version: 12.6     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 NVL                Off |   00000000:29:00.0 Off |                    0 |
+| N/A   67C    P0            258W /  310W |     818MiB /  95830MiB |     54%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100 NVL                Off |   00000000:C1:00.0 Off |                    0 |
+| N/A   31C    P0             59W /  310W |       4MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
++-----------------------------------------------------------------------------------------+
+Running Python script...
+Thu Feb 12 12:50:02 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 560.28.03              Driver Version: 560.28.03      CUDA Version: 12.6     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 NVL                Off |   00000000:29:00.0 Off |                    0 |
+| N/A   69C    P0            259W /  310W |     818MiB /  95830MiB |     72%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100 NVL                Off |   00000000:C1:00.0 Off |                    0 |
+| N/A   31C    P0             59W /  310W |       4MiB /  95830MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
++-----------------------------------------------------------------------------------------+
+Traceback (most recent call last):
+  File "/scratch/Collin/envs/sae/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/scratch/Collin/envs/sae/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/scratch/Collin/SAEBench/sae_bench/evals/sparse_probing/main.py", line 586, in <module>
+    config, selected_saes = create_config_and_selected_saes(args)
+  File "/scratch/Collin/SAEBench/sae_bench/evals/sparse_probing/main.py", line 472, in create_config_and_selected_saes
+    config.llm_batch_size = activation_collection.LLM_NAME_TO_BATCH_SIZE[
+KeyError: 'gemma-3-4b'
+Using device: cuda
+[W212 12:50:53.946814659 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())
+Job finished at Thu Feb 12 12:50:57 CST 2026

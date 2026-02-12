@@ -91,9 +91,13 @@ from unittest.mock import patch
 from sae_probes.constants import DEFAULT_RESULTS_PATH  # noqa: E402
 from sae_probes.generate_sae_activations import generate_sae_activations  # noqa: E402
 from sae_probes.utils_training import find_best_reg  # noqa: E402
+from sklearn.linear_model import OrthogonalMatchingPursuit
+import numpy as np
 
+# Global switch: "topk" or "omp"
+FEATURE_SELECTION_METHOD = "topk"
 
-def create_latent_subset_patch(sae_feature_indices: torch.Tensor, sae_evals_mod):  # type: ignore
+def create_latent_subset_patch(sae_feature_indices: torch.Tensor, sae_evals_mod):
     """
     Returns a patched version of run_sae_eval that restricts analysis to
     specific SAE latent indices provided in the tensor.
@@ -118,7 +122,8 @@ def create_latent_subset_patch(sae_feature_indices: torch.Tensor, sae_evals_mod)
         mean_diff_normalization="mean",
     ):
         print("PATCHED run_sae_eval", dataset, "subset_size", len(sae_feature_indices))
-        # 1. Generate full activations
+        print(f"Feature selection method: {FEATURE_SELECTION_METHOD}")
+
         activations = generate_sae_activations(
             sae=sae,
             setting=setting,
@@ -139,14 +144,11 @@ def create_latent_subset_patch(sae_feature_indices: torch.Tensor, sae_evals_mod)
 
         idxs = sae_feature_indices.to(X_train_sae.device)
 
-        # --- PATCH START: Subset Features ---
-        # Slice the columns using the provided tensor
         X_train_sae = X_train_sae[:, idxs]
         X_test_sae = X_test_sae[:, idxs]
 
         subset_size = X_train_sae.shape[1]
 
-        # Filter 'k' values that are larger than our new subset
         if ks is None:
             if setting == "normal":
                 ks = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
@@ -156,11 +158,9 @@ def create_latent_subset_patch(sae_feature_indices: torch.Tensor, sae_evals_mod)
         ks = [k for k in ks if k <= subset_size]
         if not ks:
             ks = [subset_size]
-        # --- PATCH END ---
 
         all_metrics = []
 
-        # 2. Retrieve local helpers dynamically from the module
         mean_act_normalization = getattr(sae_evals_mod, "mean_act_normalization")
         get_sorted_indices = getattr(sae_evals_mod, "get_sorted_indices")
         get_save_metrics_path = getattr(sae_evals_mod, "get_save_metrics_path")
@@ -173,15 +173,24 @@ def create_latent_subset_patch(sae_feature_indices: torch.Tensor, sae_evals_mod)
         elif callable(mean_diff_normalization):
             normalization = mean_diff_normalization
         else:
-            raise ValueError(
-                f"Invalid mean_diff_normalization: {mean_diff_normalization}"
-            )
+            raise ValueError(f"Invalid mean_diff_normalization: {mean_diff_normalization}")
 
-        # 3. Calculate indices on the SUBSET
-        sorted_subset_indices = get_sorted_indices(X_train_sae, y_train, normalization)
+        # Precompute for topk
+        if FEATURE_SELECTION_METHOD == "topk":
+            sorted_indices = get_sorted_indices(X_train_sae, y_train, normalization)
+
+        # Precompute numpy arrays for OMP
+        if FEATURE_SELECTION_METHOD == "omp":
+            X_np = X_train_sae.cpu().float().numpy()
+            y_np = y_train.cpu().float().numpy()
 
         for k in tqdm(ks, desc="Evaluating k values"):
-            top_subset_indices = sorted_subset_indices[:k]
+            if FEATURE_SELECTION_METHOD == "omp":
+                omp = OrthogonalMatchingPursuit(n_nonzero_coefs=k)
+                omp.fit(X_np, y_np)
+                top_subset_indices = np.where(omp.coef_ != 0)[0]
+            else:
+                top_subset_indices = sorted_indices[:k]
 
             X_train_filtered = X_train_sae[:, top_subset_indices]
             X_test_filtered = X_test_sae[:, top_subset_indices]
@@ -201,9 +210,6 @@ def create_latent_subset_patch(sae_feature_indices: torch.Tensor, sae_evals_mod)
             )
             metrics = asdict(results.metrics)
 
-            # --- PATCH: Map indices back to global IDs ---
-            # 'top_subset_indices' are indices 0..N of the subset.
-            # We map them back to the original SAE indices for the JSON log.
             global_indices = idxs[top_subset_indices].tolist()
 
             metrics.update(
@@ -214,6 +220,7 @@ def create_latent_subset_patch(sae_feature_indices: torch.Tensor, sae_evals_mod)
                     "reg_type": reg_type,
                     "binarize": binarize,
                     "indices": global_indices,
+                    "feature_selection": FEATURE_SELECTION_METHOD,
                 }
             )
 
@@ -245,7 +252,6 @@ def create_latent_subset_patch(sae_feature_indices: torch.Tensor, sae_evals_mod)
         return True
 
     return patched_run_sae_eval
-
 
 def run_eval(
     config: SparseProbingSaeProbesEvalConfig,
@@ -512,7 +518,7 @@ def arg_parser():
         "--ks",
         type=int,
         nargs="+",
-        default=[1, 2, 5],
+        default=[1, 2, 5, 10, 20, 50, 100],
         help="List of K values",
     )
     parser.add_argument("--binarize", action="store_true")

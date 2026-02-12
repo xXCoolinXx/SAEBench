@@ -3,13 +3,17 @@ import math
 
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 from beartype import beartype
 from jaxtyping import Bool, Float, Int, jaxtyped
 from sklearn.linear_model import LogisticRegression, OrthogonalMatchingPursuit
 from sklearn.metrics import accuracy_score
+from sklearn.feature_selection import SequentialFeatureSelector
 
 import sae_bench.sae_bench_utils.dataset_info as dataset_info
 
+from joblib import Parallel, delayed
+from sklearn.model_selection import cross_val_score
 
 class Probe(nn.Module):
     def __init__(self, activation_dim: int, dtype: torch.dtype):
@@ -93,8 +97,11 @@ def get_top_k_mean_diff_mask(
     acts_BD: Float[torch.Tensor, "batch_size d_model"],
     labels_B: Int[torch.Tensor, "batch_size"],
     k: int,
+    cache_key : str | None = None,
 ) -> Bool[torch.Tensor, "k"]:
-    return get_omp_mask(acts_BD, labels_B, k)
+    return get_fisher_mask(acts_BD, labels_B, k)
+    # return get_omp_mask(acts_BD, labels_B, k)
+    # return get_topk_filter_sfs_mask(acts_BD, labels_B, k, cache_key)
     # positive_mask_B = labels_B == dataset_info.POSITIVE_CLASS_LABEL
     # negative_mask_B = labels_B == dataset_info.NEGATIVE_CLASS_LABEL
 
@@ -108,12 +115,71 @@ def get_top_k_mean_diff_mask(
 
     # return mask_D
 
+_sfs_cache = {}
+
+def get_topk_filter_sfs_mask(acts_BD, labels_B, k,cache_key : str | None = None, filter_count=200, ):
+    if cache_key not in _sfs_cache:
+        positive_mask_B = labels_B == dataset_info.POSITIVE_CLASS_LABEL
+        negative_mask_B = labels_B == dataset_info.NEGATIVE_CLASS_LABEL
+
+        positive_acts = acts_BD[positive_mask_B]
+        negative_acts = acts_BD[negative_mask_B]
+
+        positive_distribution_D = positive_acts.mean(dim=0)
+        negative_distribution_D = negative_acts.mean(dim=0)
+
+        pvar = positive_acts.var(dim = 0)
+        nvar = negative_acts.var(dim = 0)
+
+        distribution_diff_D = (positive_distribution_D - negative_distribution_D).abs()
+        fisher_D = distribution_diff_D ** 2 / (pvar + nvar + 1e-3)
+
+        top_filter_indices_F = torch.argsort(fisher_D, descending=True)[:filter_count]
+
+        filtered_acts_BF = acts_BD[:, top_filter_indices_F].cpu().float().numpy()
+        labels_np = labels_B.cpu().numpy()
+
+        max_k = min(100, filter_count)
+        remaining = set(range(filtered_acts_BF.shape[1]))
+        selected_order = []
+
+        def evaluate_candidate(candidate, selected_order):
+            feat_indices = selected_order + [candidate]
+            X_sub = filtered_acts_BF[:, feat_indices]
+            scores = cross_val_score(
+                LogisticRegression(max_iter=200, solver="liblinear", penalty="l2"),
+                X_sub, labels_np, cv=10, scoring="accuracy",
+            )
+            return candidate, scores.mean()
+
+        print("No cache hit. Generating:")
+        for step in tqdm(range(max_k)):
+            results = Parallel(n_jobs=16)(
+                delayed(evaluate_candidate)(c, selected_order)
+                for c in remaining
+            )
+            best_feat = max(results, key=lambda x: x[1])[0]
+            selected_order.append(best_feat)
+            remaining.remove(best_feat)
+
+        _sfs_cache[cache_key] = (top_filter_indices_F, selected_order)
+
+    top_filter_indices_F, selected_order = _sfs_cache[cache_key]
+    selected_in_filtered = selected_order[:k]
+    selected_original_indices = top_filter_indices_F[selected_in_filtered]
+
+    mask_D = torch.ones(acts_BD.shape[1], dtype=torch.bool, device=acts_BD.device)
+    mask_D[selected_original_indices] = False
+    return mask_D
+
+
 # Test with orthogonal matching pursuit feature selection - maybe this helps!
 @jaxtyped(typechecker=beartype)
 def get_omp_mask(
     acts_BD: Float[torch.Tensor, "batch_size d_model"],
     labels_B: Int[torch.Tensor, "batch_size"],
     k: int,
+    cache_key : str | None = None,
 ) -> Bool[torch.Tensor, "d_model"]:
     """Use Orthogonal Matching Pursuit to greedily select k features
     that best predict the binary label (treated as a regression target)."""
@@ -131,6 +197,128 @@ def get_omp_mask(
 
     return mask_D
 
+@beartype
+def get_omd_mask(
+    acts_BD: Float[torch.Tensor, "batch_size d_model"],
+    labels_B: Int[torch.Tensor, "batch_size"],
+    k: int,
+    cache_key : str | None = None,
+) -> Bool[torch.Tensor, "d_model"]:
+    """
+    Orthogonal Mean Difference (OMD) for classification.
+    Greedily selects k features based on class mean difference, orthogonalizing 
+    remaining activations w.r.t the selected feature at each step.
+    """
+    residual_acts = acts_BD.clone().float()
+    pos_mask = labels_B == 1
+    neg_mask = labels_B == 0
+    
+    selected_indices = []
+    d_model = acts_BD.shape[1]
+    
+    # Ensure we don't crash on empty classes
+    if not pos_mask.any() or not neg_mask.any():
+        return torch.ones(d_model, dtype=torch.bool, device=acts_BD.device)
+
+    for _ in range(k):
+        # 1. Compute mean difference on current residuals
+        mu_pos = residual_acts[pos_mask].mean(dim=0)
+        mu_neg = residual_acts[neg_mask].mean(dim=0)
+        diff = torch.abs(mu_pos - mu_neg)
+
+        # 2. Mask previously selected
+        if selected_indices:
+            diff[selected_indices] = -1.0
+
+        # 3. Select best feature
+        best_idx = torch.argmax(diff).item()
+        selected_indices.append(best_idx)
+
+        # 4. Orthogonalize: Project selected feature out of all activations
+        v = residual_acts[:, best_idx]
+        v_norm = torch.linalg.vector_norm(v)
+        
+        if v_norm > 1e-6:
+            v_hat = v / v_norm
+            projections = v_hat @ residual_acts  # (D,)
+            residual_acts -= torch.outer(v_hat, projections)
+
+    # Return mask (True = EXCLUDE)
+    mask_D = torch.ones(d_model, dtype=torch.bool, device=acts_BD.device)
+    mask_D[selected_indices] = False
+    
+    return mask_D
+
+@beartype
+def get_fisher_mask(
+    acts_BD: Float[torch.Tensor, "batch_size d_model"],
+    labels_B: Int[torch.Tensor, "batch_size"],
+    k: int,
+    cache_key : str | None = None,
+    gamma : float = 1e-2,
+) -> Bool[torch.Tensor, "d_model"]:
+    """
+    Orthogonal Fisher Analysis.
+    Selects features that maximize the Fisher Score (Signal-to-Noise Ratio),
+    then orthogonalizes residuals.
+    
+    Score = (Mean_Diff)^2 / (Var_Pos + Var_Neg + gamma)
+    Gamma term is added to avoid issues with very low variance
+    """
+    residual_acts = acts_BD.clone().float()
+    pos_mask = labels_B == 1
+    neg_mask = labels_B == 0
+    
+    selected_indices = []
+    d_model = acts_BD.shape[1]
+    
+    # Safety check for empty classes
+    if not pos_mask.any() or not neg_mask.any():
+        return torch.ones(d_model, dtype=torch.bool, device=acts_BD.device)
+    
+    for _ in range(k):
+        # 1. Compute Means and Variances for each class on RESIDUALS
+        # Note: We use var(dim=0) to get variance per feature
+        
+        # Positive Class Stats
+        acts_pos = residual_acts[pos_mask]
+        mu_pos = acts_pos.mean(dim=0)
+        var_pos = acts_pos.var(dim=0)
+        
+        # Negative Class Stats
+        acts_neg = residual_acts[neg_mask]
+        mu_neg = acts_neg.mean(dim=0)
+        var_neg = acts_neg.var(dim=0)
+
+        # 2. Compute Fisher Score (Signal / Noise)
+        # We add epsilon to denominator to prevent division by zero for constant features
+        numerator = (mu_pos - mu_neg) ** 2
+        denominator = var_pos + var_neg + gamma
+        #variance_term = torch.log((var_pos + var_neg) / (2 * torch.sqrt(var_pos * var_neg) + gamma))
+        fisher_scores = numerator / denominator# + variance_term
+
+        # 3. Mask previously selected
+        if selected_indices:
+            fisher_scores[selected_indices] = -1.0
+
+        # 4. Select best feature
+        best_idx = torch.argmax(fisher_scores).item()
+        selected_indices.append(best_idx)
+
+        # 5. Orthogonalize (Same as OMD)
+        v = residual_acts[:, best_idx]
+        v_norm = torch.linalg.vector_norm(v)
+        
+        if v_norm > 1e-6:
+            v_hat = v / v_norm
+            projections = v_hat @ residual_acts
+            residual_acts -= torch.outer(v_hat, projections)
+
+    # Return mask (True = EXCLUDE)
+    mask_D = torch.ones(d_model, dtype=torch.bool, device=acts_BD.device)
+    mask_D[selected_indices] = False
+    
+    return mask_D
 
 @jaxtyped(typechecker=beartype)
 def apply_topk_mask_zero_dims(
@@ -179,8 +367,8 @@ def train_sklearn_probe(
     if l1_ratio is not None:
         # Use Elastic Net regularization
         probe = LogisticRegression(
-            penalty="elasticnet",
-            solver="saga",
+            penalty="elasticnet" if l1_ratio != 1.0 else "l1",
+            solver="saga" if l1_ratio != 1.0 else "liblinear",
             C=C,
             l1_ratio=l1_ratio,
             max_iter=max_iter,
@@ -201,7 +389,7 @@ def train_sklearn_probe(
 
     if verbose:
         print("\nTraining completed.")
-        print(f"Train accuracy: {train_accuracy}, Test accuracy: {test_accuracy}\n")
+        print(f"Train accuracy: {train_accuracy}, Test accuracy: {test_accuracy:.6f}\n")
 
     return probe, test_accuracy
 
@@ -341,6 +529,7 @@ def train_probe_on_activations(
     early_stopping_patience: int = 10,
     perform_scr: bool = False,
     l1_penalty: float | None = None,
+    dataset_name : str | None = None
 ) -> tuple[dict[str, LogisticRegression | Probe], dict[str, float]]:
     """Train a probe on the given activations and return the probe and test accuracies for each profession.
     use_sklearn is a flag to use sklearn's LogisticRegression model instead of a custom PyTorch model.
@@ -349,6 +538,8 @@ def train_probe_on_activations(
     torch.set_grad_enabled(True)
 
     probes, test_accuracies = {}, {}
+    penalty_str = l1_penalty if l1_penalty is not None else "None"
+
 
     for profession in train_activations.keys():
         train_acts, train_labels = prepare_probe_data(
@@ -360,22 +551,26 @@ def train_probe_on_activations(
 
         if select_top_k is not None:
             activation_mask_D = get_top_k_mean_diff_mask(
-                train_acts, train_labels, select_top_k
+                train_acts, train_labels, select_top_k, cache_key=f"{dataset_name}_{profession}"
             )
             train_acts = apply_topk_mask_reduce_dim(train_acts, activation_mask_D)
             test_acts = apply_topk_mask_reduce_dim(test_acts, activation_mask_D)
 
         activation_dim = train_acts.shape[1]
 
-        print(f"Num non-zero elements: {activation_dim}")
-
+        print(f"Num non-zero elements: {activation_dim}, L1 Penalty: {penalty_str}")
+        l1_ratio = 1.0 if l1_penalty is not None else None
+        
         if use_sklearn:
+            c_val = l1_penalty if l1_penalty else 1.0
             probe, test_accuracy = train_sklearn_probe(
                 train_acts,
                 train_labels,
                 test_acts,
                 test_labels,
                 verbose=False,
+                l1_ratio=l1_ratio,
+                C=c_val,
             )
         else:
             probe, test_accuracy = train_probe_gpu(

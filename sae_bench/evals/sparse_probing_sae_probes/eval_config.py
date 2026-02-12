@@ -32,7 +32,7 @@ class SparseProbingSaeProbesEvalConfig(BaseEvalConfig):
     )
 
     ks: list[int] = Field(
-        default_factory=lambda: [1, 2, 5],
+        default_factory=lambda: [1, 2, 5, 10, 20, 50, 100],
         title="K Values",
         description="List of K values (number of SAE features) to evaluate.",
     )

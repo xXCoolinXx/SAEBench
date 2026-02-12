@@ -1,0 +1,85 @@
+#!/bin/bash
+# --- PBS Directives ---
+
+# Set the name of the job
+#PBS -N SAE
+
+# Specify the queue to use
+# The queue name 'gpu_queue' is an example; replace it with the actual name on your system.
+#PBS -q gpu
+
+# Request resources: 1 node, 1 CPU, and 1 GPU
+#PBS -l select=1:ncpus=16:ngpus=1:mem=16gb
+
+# Set the maximum walltime for the job (e.g., 1 hour)
+#PBS -l walltime=08:00:00
+
+# Redirect standard output and error to files
+#PBS -o job_output.log
+#PBS -e job_error.log
+
+# --- Job Commands ---
+
+# nvidia-smi
+
+export WANDB_API_KEY=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
+
+echo "Job started on $(hostname) at $(date)"
+# Navigate to the directory where the job was submitted
+cd $PBS_O_WORKDIR
+
+# Load necessary modules (e.g., CUDA, Python/PyTorch)
+# These module names are examples; they may differ on your system.
+module load anaconda
+module load cuda/12.6.0
+# conda init
+
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate /scratch/Collin/envs/sae # Activate your conda environment if needed
+
+# Remove stubs
+# export LD_LIBRARY_PATH=$(echo $LD_LIBRARY_PATH | sed 's|/lib64/stubs||g')
+export LD_LIBRARY_PATH=$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v "stubs" | tr '\n' ':')
+
+# Check which GPU has been allocated
+echo "GPU allocated:"
+nvidia-smi
+
+# Run your GPU-accelerated application
+echo "Running Python script..."
+
+export HF_HOME=/scratch/Collin/.cache/huggingface
+
+
+LOGFILE=$PBS_O_WORKDIR/logs/debug_$(date +%Y%m%d_%H%M%S).log
+
+{
+    nvidia-smi
+
+    # CUDA_VISIBLE_DEVICES=0 /scratch/Collin/envs/sae/bin/python -m sae_bench.evals.sparse_probing.main \
+    # --sae_regex_pattern "gemma-scope-2b-pt-res-canonical" \
+    # --sae_block_pattern "layer_12/width_16k/canonical" \
+    # --model_name "gemma-2-2b" \
+
+    CUDA_VISIBLE_DEVICES=0 /scratch/Collin/envs/sae/bin/python -m sae_bench.evals.sparse_probing.main \
+    --sae_regex_pattern "gemma-scope-2-4b-pt-res" \
+    --sae_block_pattern "layer_17_width_65k_10_medium" \
+    --model_name "gemma-3-4b" \
+    
+    # Test with matryoshka
+    # CUDA_VISIBLE_DEVICES=0 /scratch/Collin/envs/sae/bin/python -m sae_bench.evals.sparse_probing.main \
+    # --sae_regex_pattern "gemma-2-2b-res-matryoshka-dc" \
+    # --sae_block_pattern "blocks\.12\.hook_resid_post" \
+    # --model_name "gemma-2-2b" \
+
+    # --model_cache_path "./artifacts/sparse_probing_sae_probes--model_acts_cache" 
+
+    # CUDA_VISIBLE_DEVICES=0 /scratch/Collin/envs/sae/bin/python -m sae_bench.evals.sparse_probing_sae_probes.main \
+    # --sae_regex_pattern "gemma-scope-2b-pt-res-canonical" \
+    # --sae_block_pattern "layer_12/width_16k/canonical" \
+    # --model_name "gemma-2-2b" \
+    # --model_cache_path "./artifacts/sparse_probing_sae_probes--model_acts_cache"
+} 2>&1 | tee $LOGFILE
+
+
+echo "Job finished at $(date)"

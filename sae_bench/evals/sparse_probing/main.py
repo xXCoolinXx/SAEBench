@@ -37,6 +37,8 @@ from sae_lens import SAE
 from tqdm import tqdm
 from transformer_lens import HookedTransformer
 
+from sae_bench.evals.sparse_probing.masking_strategies import MaskingStrategy, mask_registry
+
 
 def get_dataset_activations(
     dataset_name: str,
@@ -127,18 +129,21 @@ def run_eval_single_dataset(
         if config.lower_vram_usage:
             model = model.to("cpu")  # type: ignore
 
-        all_train_acts_BD = activation_collection.create_meaned_model_activations(
-            all_train_acts_BLD
+        all_train_acts_BD = activation_collection.create_pooled_model_activations(
+            all_train_acts_BLD,
+            pooling_strategy=config.pooling_strategy
         )
 
-        all_test_acts_BD = activation_collection.create_meaned_model_activations(
-            all_test_acts_BLD
+        all_test_acts_BD = activation_collection.create_pooled_model_activations(
+            all_test_acts_BLD,
+            pooling_strategy=config.pooling_strategy
         )
 
         # We use GPU here as sklearn.fit is slow on large input dimensions, all other probe training is done with sklearn.fit
         llm_probes, llm_test_accuracies = probe_training.train_probe_on_activations(
             all_train_acts_BD,
             all_test_acts_BD,
+            masking_strategy=None,
             select_top_k=None,
             use_sklearn=False,
             batch_size=250,
@@ -177,24 +182,13 @@ def run_eval_single_dataset(
         all_test_acts_BLD = acts["test"]
         llm_results = acts["llm_results"]
 
-    all_sae_train_acts_BF = activation_collection.get_sae_meaned_activations(
+    all_sae_train_acts_BF = activation_collection.get_sae_pooled_activations(
         all_train_acts_BLD, sae, config.sae_batch_size
     )
 
-    all_sae_test_acts_BF = activation_collection.get_sae_meaned_activations(
+    all_sae_test_acts_BF = activation_collection.get_sae_pooled_activations(
         all_test_acts_BLD, sae, config.sae_batch_size
     )
-
-    # Slice to only include the chosen indices of features
-    for k in all_sae_train_acts_BF.keys():
-        all_sae_train_acts_BF[k] = all_sae_train_acts_BF[k][
-            ..., config.sae_feature_indices
-        ]
-
-    for k in all_sae_test_acts_BF.keys():
-        all_sae_test_acts_BF[k] = all_sae_test_acts_BF[k][
-            ..., config.sae_feature_indices
-        ]
 
     for key in list(all_train_acts_BLD.keys()):
         del all_train_acts_BLD[key]
@@ -206,6 +200,7 @@ def run_eval_single_dataset(
         _, sae_test_accuracies = probe_training.train_probe_on_activations(
             all_sae_train_acts_BF,
             all_sae_test_acts_BF,
+            masking_strategy=None,
             select_top_k=None,
             use_sklearn=False,
             batch_size=250,
@@ -227,43 +222,21 @@ def run_eval_single_dataset(
     for llm_result_key, llm_result_value in llm_results.items():
         per_class_results_dict[llm_result_key] = llm_result_value
 
+    masking_strategy = mask_registry[config.masking_strategy]()
     for k in config.k_values:
         sae_top_k_probes, sae_top_k_test_accuracies = (
             probe_training.train_probe_on_activations(
                 all_sae_train_acts_BF,
                 all_sae_test_acts_BF,
+                masking_strategy=masking_strategy,
                 select_top_k=k,
             )
         )
 
         per_class_results_dict[f"sae_top_{k}_test_accuracy"] = sae_top_k_test_accuracies
-
-    # search_space = [1e-30, 1e-25, 1e-20, 1e-17, 1e-15]
-
-    # for x in np.logspace(-10, -1, 5):
-    #     sae_l1_probes, sae_l1_test_accuracies = (
-    #         probe_training.train_probe_on_activations(
-    #             all_sae_train_acts_BF,
-    #             all_sae_test_acts_BF,
-    #             select_top_k=None,
-    #             l1_penalty=x,
-    #             use_sklearn=False, # I ain't waiting for all that
-    #         )
-    #     )
-    #     # Report min max avg l0 for the probes
-    #     l0 = []
-
-    #     for probe in sae_l1_probes.values():
-    #         if isinstance(probe, LogisticRegression):
-    #             k_active = np.sum(probe.coef_[0] != 0)
-    #         elif isinstance(probe, probe_training.Probe):
-    #             k_active = torch.count_nonzero(probe.net.weight).item()
-
-    #         l0.append(k_active) # type: ignore
-        
-    #     l0 = np.array(l0)
-            
-    #     per_class_results_dict[f"sae_l1_{l0.min()}_{l0.max()}_{l0.mean()}_test_accuracy"] = sae_l1_test_accuracies
+    
+    # Clear cache to free up memory. We are done using the current cache after running with all k values on the current task
+    masking_strategy.clear_cache()
 
     results_dict = {}
     for key, test_accuracies_dict in per_class_results_dict.items():
@@ -342,11 +315,6 @@ def run_eval(
     You may want to use this because activations for all datasets can easily be 10s of GBs.
     Return dict is a dict of SAE name: evaluation results for that SAE."""
 
-    if len(selected_saes) > 1 and config.sae_feature_indices is not None:
-        raise NotImplementedError(
-            "Passing in a set of feature indices for multiple SAEs is not currently supported :("
-        )
-
     eval_instance_id = get_eval_uuid()
     sae_lens_version = get_sae_lens_version()
     sae_bench_commit_hash = get_sae_bench_version()
@@ -370,21 +338,15 @@ def run_eval(
         )  # type: ignore
         sae = sae.to(device=device, dtype=llm_dtype)
 
-        if config.sae_feature_indices is None:
-            d_sae = sae.W_dec.shape[0]
-            config.sae_feature_indices = torch.arange(0, d_sae, device=device)
-
-        r_min = config.sae_feature_indices.min().item()
-        r_max = config.sae_feature_indices.max().item()
         sae_result_path = general_utils.get_results_filepath(
             output_path,
             sae_release,
             sae_id,
-            extra_str=f"{r_min}_{r_max}",
+            extra_str="",
         )
 
         print(
-            f"Running {sae_id}, {sae} using latents {r_min} through {r_max} (possibly not contiguously!)"
+            f"Running {sae_id}, {sae}"
         )
 
         if os.path.exists(sae_result_path) and not force_rerun:
@@ -406,9 +368,9 @@ def run_eval(
             artifacts_folder,
             save_activations=save_activations,
         )
-        eval_output = SparseProbingEvalOutput(
-            eval_config=config,
-            eval_id=eval_instance_id,
+        eval_output = SparseProbingEvalOutput( 
+            eval_config=config, 
+            eval_id=eval_instance_id, 
             datetime_epoch_millis=int(datetime.now().timestamp() * 1000),
             eval_result_metrics=SparseProbingMetricCategories(
                 llm=SparseProbingLlmMetrics(
@@ -449,9 +411,6 @@ def run_eval(
         gc.collect()
         torch.cuda.empty_cache()
 
-        # Reset back to none to maintain functionality when feature_indices is not present
-        config.sae_feature_indices = None
-
     if clean_up_activations:
         if artifacts_folder is not None and os.path.exists(artifacts_folder):
             shutil.rmtree(artifacts_folder)
@@ -472,6 +431,9 @@ def create_config_and_selected_saes(
         config.llm_batch_size = activation_collection.LLM_NAME_TO_BATCH_SIZE[
             config.model_name
         ]
+        
+    config.masking_strategy = args.masking_strategy
+    config.pooling_strategy = args.pooling_strategy
 
     if args.llm_dtype is not None:
         config.llm_dtype = args.llm_dtype
@@ -564,6 +526,18 @@ def arg_parser():
         type=str,
         default="artifacts",
         help="Path to save artifacts",
+    )
+    
+    parser.add_argument(
+        "--masking_strategy",
+        type=str,
+        default="top_k_abs_mean_diff"
+    )
+
+    parser.add_argument(
+        "--pooling_strategy",
+        type=str,
+        default="mean"
     )
 
     return parser

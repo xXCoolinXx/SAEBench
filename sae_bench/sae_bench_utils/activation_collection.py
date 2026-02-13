@@ -324,6 +324,72 @@ def get_sae_meaned_activations(
     return all_sae_activations_BF
 
 
+def _get_padding_mask(
+    acts_BLD: Float[torch.Tensor, "batch seq dim"],
+) -> Bool[torch.Tensor, "batch seq"]:
+    """Non-padding mask. Assumes padding tokens have been zeroed out."""
+    return einops.reduce(acts_BLD, "B L D -> B L", "sum") != 0.0
+
+
+def _pool_sequence(
+    acts_BLF: Float[torch.Tensor, "batch seq feat"],
+    mask_BL: Bool[torch.Tensor, "batch seq"],
+    pooling_strategy: str,
+) -> Float[torch.Tensor, "batch feat"]:
+    """Pool across the sequence dimension, ignoring padding tokens."""
+    if pooling_strategy == "mean":
+        mask_f = mask_BL.unsqueeze(-1).to(dtype=acts_BLF.dtype)
+        return (acts_BLF * mask_f).sum(dim=1) / mask_f.sum(dim=1)
+    elif pooling_strategy == "max":
+        return acts_BLF.masked_fill(~mask_BL.unsqueeze(-1), float("-inf")).max(dim=1).values
+    elif pooling_strategy == "last_token":
+        positions = torch.arange(mask_BL.size(1), device=mask_BL.device).expand_as(mask_BL)
+        last_idx = positions.masked_fill(~mask_BL, -1).argmax(dim=1)
+        return acts_BLF[torch.arange(acts_BLF.size(0), device=acts_BLF.device), last_idx]
+    else:
+        raise ValueError(f"Unknown pooling strategy: {pooling_strategy}")
+
+
+@jaxtyped(typechecker=beartype)
+@torch.no_grad
+def create_pooled_model_activations(
+    all_llm_activations_BLD: dict[
+        str, Float[torch.Tensor, "batch_size seq_len d_model"]
+    ],
+    pooling_strategy: str = "mean",
+) -> dict[str, Float[torch.Tensor, "batch_size d_model"]]:
+    """Pool LLM activations across the sequence length dimension, ignoring padding tokens.
+    VERY IMPORTANT NOTE: We assume that the activations have been zeroed out for masked tokens."""
+    return {
+        class_name: _pool_sequence(acts, _get_padding_mask(acts), pooling_strategy)
+        for class_name, acts in all_llm_activations_BLD.items()
+    }
+
+
+@jaxtyped(typechecker=beartype)
+@torch.no_grad
+def get_sae_pooled_activations(
+    all_llm_activations_BLD: dict[
+        str, Float[torch.Tensor, "batch_size seq_len d_model"]
+    ],
+    sae: SAE | Any,
+    sae_batch_size: int,
+    pooling_strategy: str = "mean",
+) -> dict[str, Float[torch.Tensor, "batch_size d_sae"]]:
+    """Encode LLM activations with an SAE, then pool across the sequence length dimension, ignoring padding tokens.
+    VERY IMPORTANT NOTE: We assume that the activations have been zeroed out for masked tokens."""
+    dtype = sae.dtype
+    result = {}
+    for class_name, all_acts_BLD in all_llm_activations_BLD.items():
+        chunks = []
+        for i in range(0, len(all_acts_BLD), sae_batch_size):
+            acts_BLD = all_acts_BLD[i : i + sae_batch_size]
+            mask_BL = _get_padding_mask(acts_BLD)
+            acts_BLF = sae.encode(acts_BLD)
+            chunks.append(_pool_sequence(acts_BLF, mask_BL, pooling_strategy).to(dtype=dtype))
+        result[class_name] = torch.cat(chunks, dim=0)
+    return result
+
 @jaxtyped(typechecker=beartype)
 @torch.no_grad()
 def save_activations(

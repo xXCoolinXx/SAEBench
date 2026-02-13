@@ -9,7 +9,7 @@
 #PBS -q gpu
 
 # Request resources: 1 node, 1 CPU, and 1 GPU
-#PBS -l select=1:ncpus=16:ngpus=1:mem=16gb
+#PBS -l select=1:ncpus=2:ngpus=1:mem=16gb
 
 # Set the maximum walltime for the job (e.g., 1 hour)
 #PBS -l walltime=08:00:00
@@ -63,8 +63,8 @@ LOGFILE=$PBS_O_WORKDIR/logs/debug_$(date +%Y%m%d_%H%M%S).log
 
     CUDA_VISIBLE_DEVICES=0 /scratch/Collin/envs/sae/bin/python -m sae_bench.evals.sparse_probing.main \
     --sae_regex_pattern "gemma-scope-2-4b-pt-res" \
-    --sae_block_pattern "layer_17_width_65k_10_medium" \
-    --model_name "gemma-3-4b" \
+    --sae_block_pattern "layer_17_width_65k_l0_medium" \
+    --model_name "google/gemma-3-4b-pt" \
     
     # Test with matryoshka
     # CUDA_VISIBLE_DEVICES=0 /scratch/Collin/envs/sae/bin/python -m sae_bench.evals.sparse_probing.main \

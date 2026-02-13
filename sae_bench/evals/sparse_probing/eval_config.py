@@ -84,3 +84,15 @@ class SparseProbingEvalConfig(BaseEvalConfig):
         title="Feature Indices",
         description="The indices upon which we will train the SAE probes. Useful for analyzing partitioned architectures, such as Matryoshka and T-SAE.",
     )
+
+    masking_strategy: str = Field(
+        default="topk",
+        title="",
+        description="Masking strategy for selecting the best features. Defaults to topk (absolute mean difference)",
+    )
+
+    pooling_strategy: str = Field(
+        default='mean',
+        title = "Pooling strategy",
+        description="Pooling strategy for activations. Defaults to mean. Other options are max and last token."
+    )

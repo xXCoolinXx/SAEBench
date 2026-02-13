@@ -350,6 +350,17 @@ class LassoPath_Mask(MaskingStrategy):
 
         return mask
     
+@jaxtyped(typechecker=beartype)
+def apply_mask_reduce_dim(
+    acts: Float[torch.Tensor, "batch_size d_model"],
+    mask: Bool[torch.Tensor, "d_model"],
+) -> Float[torch.Tensor, "batch_size k"]:
+    masked_acts = acts.clone()
+
+    masked_acts = masked_acts[:, ~mask]
+
+    return masked_acts
+    
 mask_registry: dict[str, type[MaskingStrategy]] = {
     "top_k_abs_mean_diff": TopK_AbsMeanDiff_Mask,
     "top_k_fisher": TopK_Fisher_Mask,

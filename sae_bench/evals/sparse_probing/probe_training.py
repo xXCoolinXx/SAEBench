@@ -1,12 +1,15 @@
 import copy
 import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 from beartype import beartype
 from jaxtyping import Float, Int, jaxtyped
+from scipy.sparse import csr_matrix
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import StandardScaler
 
 import sae_bench.sae_bench_utils.dataset_info as dataset_info
 from sae_bench.evals.sparse_probing.masking_strategies import (
@@ -101,7 +104,8 @@ def train_sklearn_probe(
     C: float = 1.0,  # default sklearn value
     verbose: bool = False,
     l1_ratio: float | None = None,
-) -> tuple[LogisticRegression, Float]:
+    sparsity_threshold = 0.5,
+) -> tuple[LogisticRegression, float]:
     train_inputs = train_inputs.to(dtype=torch.float32)
     test_inputs = test_inputs.to(dtype=torch.float32)
 
@@ -110,6 +114,16 @@ def train_sklearn_probe(
     train_labels_np = train_labels.cpu().numpy()
     test_inputs_np = test_inputs.cpu().numpy()
     test_labels_np = test_labels.cpu().numpy()
+
+    # sparsity = 1.0 - (np.count_nonzero(train_inputs_np) / train_inputs_np.size)
+    # if sparsity > 0.5:
+    #     train_inputs_np = csr_matrix(train_inputs_np)
+    #     test_inputs_np = csr_matrix(test_inputs_np)
+
+
+    scaler = StandardScaler()
+    train_inputs_np = scaler.fit_transform(train_inputs_np)
+    test_inputs_np = scaler.transform(test_inputs_np)
 
     # Initialize the LogisticRegression model
     if l1_ratio is not None:
@@ -125,7 +139,7 @@ def train_sklearn_probe(
     else:
         # Use L2 regularization
         probe = LogisticRegression(
-            penalty="l2", C=C, max_iter=max_iter, verbose=int(verbose)
+            penalty="l2", solver="newton-cg", C=C, max_iter=max_iter, verbose=int(verbose)
         )
 
     # Train the model
@@ -268,7 +282,7 @@ def train_probe_gpu(
 def train_probe_on_activations(
     train_activations: dict[str, Float[torch.Tensor, "train_dataset_size d_model"]],
     test_activations: dict[str, Float[torch.Tensor, "test_dataset_size d_model"]],
-    masking_strategy : MaskingStrategy, 
+    masking_strategy : MaskingStrategy | None = None, 
     select_top_k: int | None = None,
     use_sklearn: bool = True,
     batch_size: int = 16,
@@ -298,13 +312,15 @@ def train_probe_on_activations(
             test_activations, profession, perform_scr
         )
 
-        if select_top_k is not None:
+        if select_top_k is not None and masking_strategy is not None:
             activation_mask = masking_strategy(
                 train_acts, train_labels, select_top_k, cache_key=f"{dataset_name}_{profession}"
             )
 
             train_acts = apply_mask_reduce_dim(train_acts, activation_mask)
             test_acts = apply_mask_reduce_dim(test_acts, activation_mask)
+        elif select_top_k is not None and masking_strategy is None:
+            raise ValueError("Must specify a masking strategy when selecting k latents")
 
         activation_dim = train_acts.shape[1]
 

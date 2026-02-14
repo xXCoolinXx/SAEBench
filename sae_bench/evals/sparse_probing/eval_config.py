@@ -3,8 +3,7 @@ from pydantic.dataclasses import dataclass
 from sae_bench.evals.base_eval_output import BaseEvalConfig
 from torch import Tensor
 
-
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@dataclass
 class SparseProbingEvalConfig(BaseEvalConfig):
     # model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -79,12 +78,6 @@ class SparseProbingEvalConfig(BaseEvalConfig):
         description="Lower GPU memory usage by doing more computation on the CPU. Useful on 1M width SAEs. Will be slower and require more system memory.",
     )
 
-    sae_feature_indices: Tensor | None = Field(
-        default=None,
-        title="Feature Indices",
-        description="The indices upon which we will train the SAE probes. Useful for analyzing partitioned architectures, such as Matryoshka and T-SAE.",
-    )
-
     masking_strategy: str = Field(
         default="topk",
         title="",
@@ -94,5 +87,5 @@ class SparseProbingEvalConfig(BaseEvalConfig):
     pooling_strategy: str = Field(
         default='mean',
         title = "Pooling strategy",
-        description="Pooling strategy for activations. Defaults to mean. Other options are max and last token."
+        description="Pooling strategy for activations. Defaults to mean. Other options are max and last_token."
     )

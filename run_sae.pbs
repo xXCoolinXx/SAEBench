@@ -61,10 +61,26 @@ LOGFILE=$PBS_O_WORKDIR/logs/debug_$(date +%Y%m%d_%H%M%S).log
     # --sae_block_pattern "layer_12/width_16k/canonical" \
     # --model_name "gemma-2-2b" \
 
-    CUDA_VISIBLE_DEVICES=0 /scratch/Collin/envs/sae/bin/python -m sae_bench.evals.sparse_probing.main \
+    CUDA_VISIBLE_DEVICES=0 /scratch/Collin/envs/sae/bin/python -u -m sae_bench.evals.sparse_probing.main \
     --sae_regex_pattern "gemma-scope-2-4b-pt-res" \
     --sae_block_pattern "layer_17_width_65k_l0_medium" \
     --model_name "google/gemma-3-4b-pt" \
+    --pooling_strategy "mean" \
+    --masking_strategy "top_k_abs_mean_diff" 
+
+    CUDA_VISIBLE_DEVICES=0 /scratch/Collin/envs/sae/bin/python -u -m sae_bench.evals.sparse_probing.main \
+    --sae_regex_pattern "gemma-scope-2-4b-pt-res" \
+    --sae_block_pattern "layer_17_width_65k_l0_medium" \
+    --model_name "google/gemma-3-4b-pt" \
+    --pooling_strategy "max" \
+    --masking_strategy "top_k_abs_mean_diff" 
+
+    CUDA_VISIBLE_DEVICES=0 /scratch/Collin/envs/sae/bin/python -u -m sae_bench.evals.sparse_probing.main \
+    --sae_regex_pattern "gemma-scope-2-4b-pt-res" \
+    --sae_block_pattern "layer_17_width_65k_l0_medium" \
+    --model_name "google/gemma-3-4b-pt" \
+    --pooling_strategy "last_token" \
+    --masking_strategy "top_k_abs_mean_diff" 
     
     # Test with matryoshka
     # CUDA_VISIBLE_DEVICES=0 /scratch/Collin/envs/sae/bin/python -m sae_bench.evals.sparse_probing.main \

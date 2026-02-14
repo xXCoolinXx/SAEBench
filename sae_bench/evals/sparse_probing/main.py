@@ -8,14 +8,17 @@ from dataclasses import asdict
 from datetime import datetime
 
 import numpy as np
+import torch
+from sae_lens import SAE
 from sklearn.linear_model import LogisticRegression
+from tqdm import tqdm
+from transformer_lens import HookedTransformer
 
 import sae_bench.evals.sparse_probing.probe_training as probe_training
 import sae_bench.sae_bench_utils.activation_collection as activation_collection
 import sae_bench.sae_bench_utils.dataset_info as dataset_info
 import sae_bench.sae_bench_utils.dataset_utils as dataset_utils
 import sae_bench.sae_bench_utils.general_utils as general_utils
-import torch
 from sae_bench.evals.sparse_probing.eval_config import SparseProbingEvalConfig
 from sae_bench.evals.sparse_probing.eval_output import (
     EVAL_TYPE_ID_SPARSE_PROBING,
@@ -25,6 +28,10 @@ from sae_bench.evals.sparse_probing.eval_output import (
     SparseProbingResultDetail,
     SparseProbingSaeMetrics,
 )
+from sae_bench.evals.sparse_probing.masking_strategies import (
+    MaskingStrategy,
+    mask_registry,
+)
 from sae_bench.sae_bench_utils import (
     get_eval_uuid,
     get_sae_bench_version,
@@ -33,11 +40,6 @@ from sae_bench.sae_bench_utils import (
 from sae_bench.sae_bench_utils.sae_selection_utils import (
     get_saes_from_regex,
 )
-from sae_lens import SAE
-from tqdm import tqdm
-from transformer_lens import HookedTransformer
-
-from sae_bench.evals.sparse_probing.masking_strategies import MaskingStrategy, mask_registry
 
 
 def get_dataset_activations(
@@ -93,24 +95,18 @@ def get_dataset_activations(
 
     return all_train_acts_BLD, all_test_acts_BLD
 
-
-def run_eval_single_dataset(
+def get_pooled_activations(
     dataset_name: str,
     config: SparseProbingEvalConfig,
     sae: SAE,
     model: HookedTransformer,
     layer: int,
     hook_point: str,
-    device: str,
+    device : str,
     artifacts_folder: str,
     save_activations: bool,
-) -> tuple[dict[str, float], dict]:
-    """config: eval_config.EvalConfig contains all hyperparameters to reproduce the evaluation.
-    It is saved in the results_dict for reproducibility."""
-
-    per_class_results_dict = {}
-
-    activations_filename = f"{dataset_name}_activations.pt".replace("/", "_")
+    ):
+    activations_filename = f"{dataset_name}_activations_{config.pooling_strategy}.pt".replace("/", "_")
 
     activations_path = os.path.join(artifacts_folder, activations_filename)
 
@@ -139,36 +135,21 @@ def run_eval_single_dataset(
             pooling_strategy=config.pooling_strategy
         )
 
-        # We use GPU here as sklearn.fit is slow on large input dimensions, all other probe training is done with sklearn.fit
-        llm_probes, llm_test_accuracies = probe_training.train_probe_on_activations(
-            all_train_acts_BD,
-            all_test_acts_BD,
-            masking_strategy=None,
-            select_top_k=None,
-            use_sklearn=False,
-            batch_size=250,
-            epochs=100,
-            lr=1e-2,
-            dataset_name=dataset_name,
+        all_sae_train_acts_BF = activation_collection.get_sae_pooled_activations(
+            all_train_acts_BLD, sae, config.sae_batch_size,
+            pooling_strategy=config.pooling_strategy
         )
 
-        llm_results = {"llm_test_accuracy": llm_test_accuracies}
-
-        # for k in config.k_values:
-        #     llm_top_k_probes, llm_top_k_test_accuracies = (
-        #         probe_training.train_probe_on_activations(
-        #             all_train_acts_BD,
-        #             all_test_acts_BD,
-        #             select_top_k=k,
-        #             dataset_name=dataset_name,
-        #         )
-        #     )
-        #     llm_results[f"llm_top_{k}_test_accuracy"] = llm_top_k_test_accuracies
+        all_sae_test_acts_BF = activation_collection.get_sae_pooled_activations(
+            all_test_acts_BLD, sae, config.sae_batch_size,
+            pooling_strategy=config.pooling_strategy
+        )
 
         acts = {
-            "train": all_train_acts_BLD,
-            "test": all_test_acts_BLD,
-            "llm_results": llm_results,
+            "train_llm": all_train_acts_BD,
+            "test_llm": all_test_acts_BD,
+            "train_sae": all_sae_train_acts_BF,
+            "test_sae": all_sae_test_acts_BF,
         }
 
         if save_activations:
@@ -178,21 +159,58 @@ def run_eval_single_dataset(
             model = model.to("cpu")  # type: ignore
         print(f"Loading activations from {activations_path}")
         acts = torch.load(activations_path)
-        all_train_acts_BLD = acts["train"]
-        all_test_acts_BLD = acts["test"]
-        llm_results = acts["llm_results"]
+        all_train_acts_BD = acts["train_llm"]
+        all_test_acts_BD = acts["test_llm"]
+        all_sae_train_acts_BF = acts['train_sae']
+        all_sae_test_acts_BF = acts['test_sae']
 
-    all_sae_train_acts_BF = activation_collection.get_sae_pooled_activations(
-        all_train_acts_BLD, sae, config.sae_batch_size
+    return all_train_acts_BD, all_test_acts_BD, all_sae_train_acts_BF, all_sae_test_acts_BF
+
+def run_eval_single_dataset(
+    dataset_name: str,
+    config: SparseProbingEvalConfig,
+    sae: SAE,
+    model: HookedTransformer,
+    layer: int,
+    hook_point: str,
+    device: str,
+    artifacts_folder: str,
+    save_activations: bool,
+) -> tuple[dict[str, float], dict]:
+    """config: eval_config.EvalConfig contains all hyperparameters to reproduce the evaluation.
+    It is saved in the results_dict for reproducibility."""
+
+    per_class_results_dict = {}
+
+    all_train_acts_BD, all_test_acts_BD, all_sae_train_acts_BF, all_sae_test_acts_BF = \
+        get_pooled_activations(dataset_name, config, sae, model, layer, hook_point, device, artifacts_folder, save_activations)
+
+    
+    # We use GPU here as sklearn.fit is slow on large input dimensions, all other probe training is done with sklearn.fit
+    llm_probes, llm_test_accuracies = probe_training.train_probe_on_activations(
+        all_train_acts_BD,
+        all_test_acts_BD,
+        masking_strategy=None,
+        select_top_k=None,
+        use_sklearn=False,
+        batch_size=250,
+        epochs=100,
+        lr=1e-2,
+        dataset_name=dataset_name,
     )
 
-    all_sae_test_acts_BF = activation_collection.get_sae_pooled_activations(
-        all_test_acts_BLD, sae, config.sae_batch_size
-    )
+    llm_results = {"llm_test_accuracy": llm_test_accuracies}
 
-    for key in list(all_train_acts_BLD.keys()):
-        del all_train_acts_BLD[key]
-        del all_test_acts_BLD[key]
+    # for k in config.k_values:
+    #     llm_top_k_probes, llm_top_k_test_accuracies = (
+    #         probe_training.train_probe_on_activations(
+    #             all_train_acts_BD,
+    #             all_test_acts_BD,
+    #             select_top_k=k,
+    #             dataset_name=dataset_name,
+    #         )
+    #     )
+    #     llm_results[f"llm_top_{k}_test_accuracy"] = llm_top_k_test_accuracies
 
     if not config.lower_vram_usage:
         # This is optional, checking the accuracy of a probe trained on the entire SAE activations
@@ -247,7 +265,6 @@ def run_eval_single_dataset(
 
     return results_dict, per_class_results_dict
 
-
 def run_eval_single_sae(
     config: SparseProbingEvalConfig,
     sae: SAE,
@@ -297,7 +314,6 @@ def run_eval_single_sae(
 
     return results_dict, per_class_dict  # type: ignore
 
-
 def run_eval(
     config: SparseProbingEvalConfig,
     selected_saes: list[tuple[str, SAE]] | list[tuple[str, str]],
@@ -338,12 +354,11 @@ def run_eval(
         )  # type: ignore
         sae = sae.to(device=device, dtype=llm_dtype)
 
-        sae_result_path = general_utils.get_results_filepath(
-            output_path,
-            sae_release,
-            sae_id,
-            extra_str="",
-        )
+        # Make subfolder for the particular SAE
+        output_subpath = output_path + f"/{sae_release}_{sae_id}/"
+        os.makedirs(output_subpath, exist_ok=True)
+
+        sae_result_path = output_subpath + f"{config.pooling_strategy}_{config.masking_strategy}.json"
 
         print(
             f"Running {sae_id}, {sae}"
@@ -417,7 +432,6 @@ def run_eval(
 
     return results_dict
 
-
 def create_config_and_selected_saes(
     args,
 ) -> tuple[SparseProbingEvalConfig, list[tuple[str, str]]]:
@@ -460,7 +474,6 @@ def create_config_and_selected_saes(
         print(f"Sample SAEs: {release}, {sae}")
 
     return config, selected_saes
-
 
 def arg_parser():
     parser = argparse.ArgumentParser(description="Run sparse probing evaluation")
@@ -541,7 +554,6 @@ def arg_parser():
     )
 
     return parser
-
 
 if __name__ == "__main__":
     """
